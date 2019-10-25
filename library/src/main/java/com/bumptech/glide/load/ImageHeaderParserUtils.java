@@ -3,8 +3,10 @@ package com.bumptech.glide.load;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import com.bumptech.glide.load.ImageHeaderParser.ImageType;
+import com.bumptech.glide.load.data.ParcelFileDescriptorRewinder;
 import com.bumptech.glide.load.engine.bitmap_recycle.ArrayPool;
 import com.bumptech.glide.load.resource.bitmap.RecyclableBufferedInputStream;
+import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.ByteBuffer;
@@ -34,20 +36,16 @@ public final class ImageHeaderParserUtils {
     }
 
     is.mark(MARK_READ_LIMIT);
-    //noinspection ForLoopReplaceableByForEach to improve perf
-    for (int i = 0, size = parsers.size(); i < size; i++) {
-      ImageHeaderParser parser = parsers.get(i);
-      try {
-        ImageType type = parser.getType(is);
-        if (type != ImageType.UNKNOWN) {
-          return type;
-        }
-      } finally {
-        is.reset();
-      }
-    }
-
-    return ImageType.UNKNOWN;
+    InputStream finalIs = is;
+    return getTypeInternal(
+        parsers,
+        parser -> {
+          try {
+            return parser.getType(finalIs);
+          } finally {
+            finalIs.reset();
+          }
+        });
   }
 
   /** Returns the ImageType for the given ByteBuffer. */
@@ -58,10 +56,41 @@ public final class ImageHeaderParserUtils {
       return ImageType.UNKNOWN;
     }
 
+    return getTypeInternal(parsers, parser -> parser.getType(buffer));
+  }
+
+  @NonNull
+  public static ImageType getType(
+      @NonNull List<ImageHeaderParser> parsers,
+      @NonNull ParcelFileDescriptorRewinder parcelFileDescriptorRewinder,
+      @NonNull ArrayPool byteArrayPool)
+      throws IOException {
+    return getTypeInternal(
+        parsers,
+        parser -> {
+          // Wrap the FileInputStream into a RecyclableBufferedInputStream to optimize I/O
+          // performance.
+          InputStream is =
+              new RecyclableBufferedInputStream(
+                  new FileInputStream(
+                      parcelFileDescriptorRewinder.rewindAndGet().getFileDescriptor()),
+                  byteArrayPool);
+          try {
+            return parser.getType(is);
+          } finally {
+            is.close();
+            parcelFileDescriptorRewinder.rewindAndGet();
+          }
+        });
+  }
+
+  @NonNull
+  private static ImageType getTypeInternal(
+      @NonNull List<ImageHeaderParser> parsers, TypeReader reader) throws IOException {
     //noinspection ForLoopReplaceableByForEach to improve perf
     for (int i = 0, size = parsers.size(); i < size; i++) {
       ImageHeaderParser parser = parsers.get(i);
-      ImageType type = parser.getType(buffer);
+      ImageType type = reader.getType(parser);
       if (type != ImageType.UNKNOWN) {
         return type;
       }
@@ -85,19 +114,61 @@ public final class ImageHeaderParserUtils {
     }
 
     is.mark(MARK_READ_LIMIT);
+    InputStream finalIs = is;
+    return getOrientationInternal(
+        parsers,
+        parser -> {
+          try {
+            return parser.getOrientation(finalIs, byteArrayPool);
+          } finally {
+            finalIs.reset();
+          }
+        });
+  }
+
+  public static int getOrientation(
+      @NonNull List<ImageHeaderParser> parsers,
+      @NonNull ParcelFileDescriptorRewinder parcelFileDescriptorRewinder,
+      @NonNull ArrayPool byteArrayPool)
+      throws IOException {
+    return getOrientationInternal(
+        parsers,
+        parser -> {
+          // Wrap the FileInputStream into a RecyclableBufferedInputStream to optimize I/O
+          // performance.
+          InputStream is =
+              new RecyclableBufferedInputStream(
+                  new FileInputStream(
+                      parcelFileDescriptorRewinder.rewindAndGet().getFileDescriptor()),
+                  byteArrayPool);
+          try {
+            return parser.getOrientation(is, byteArrayPool);
+          } finally {
+            is.close();
+            parcelFileDescriptorRewinder.rewindAndGet();
+          }
+        });
+  }
+
+  private static int getOrientationInternal(
+      @NonNull List<ImageHeaderParser> parsers, OrientationReader reader) throws IOException {
     //noinspection ForLoopReplaceableByForEach to improve perf
     for (int i = 0, size = parsers.size(); i < size; i++) {
       ImageHeaderParser parser = parsers.get(i);
-      try {
-        int orientation = parser.getOrientation(is, byteArrayPool);
-        if (orientation != ImageHeaderParser.UNKNOWN_ORIENTATION) {
-          return orientation;
-        }
-      } finally {
-        is.reset();
+      int orientation = reader.getOrientation(parser);
+      if (orientation != ImageHeaderParser.UNKNOWN_ORIENTATION) {
+        return orientation;
       }
     }
 
     return ImageHeaderParser.UNKNOWN_ORIENTATION;
+  }
+
+  private interface TypeReader {
+    ImageType getType(ImageHeaderParser parser) throws IOException;
+  }
+
+  private interface OrientationReader {
+    int getOrientation(ImageHeaderParser parser) throws IOException;
   }
 }
